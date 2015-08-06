@@ -1,0 +1,371 @@
+---
+title: "assignment1"
+author: "Qijing Zhang (Vicky)"
+date: "August 2, 2015"
+output: html_document
+---
+
+
+```{r ballot}
+library(doBy)
+library(ggplot2)
+georgia <- read.csv("/Users/vickyzhang/Documents/MSBA/predictive2/STA380/data/georgia2000.csv", row.names=1)
+names(georgia)
+head(georgia)
+georgia['undercount'] = georgia['ballots'] - georgia['votes'] 
+# look at how equipment affects undercount, without pivot
+# syntax: y~x, x is the col you want to group by, y is the value you want to be grouped!
+equip_undercount = summaryBy(undercount~equip, data=georgia, FUN = function(x) c(m = mean(x)) )
+equip_undercount
+# Punchcards obviously lead to the higest average undercount. Paper leads to the lowest.
+
+######## investigate whether this has an effect on poor and minority communities
+# use contingency table
+t1 = xtabs(undercount~poor+equip, data = georgia)
+t1
+# get average of each category, using summaryBy()
+georgia_poor = georgia[georgia['poor'] == 0,]
+xtab_poor = summaryBy(undercount~equip, data=georgia_poor, FUN = function(x) c(m = mean(x)) )
+xtab_poor
+georgia_nonpoor = georgia[georgia['poor'] == 1,]
+xtab_nonpoor = summaryBy(undercount~equip, data=georgia_nonpoor, FUN = function(x) c(m = mean(x)) )
+xtab_nonpoor
+
+# the effect of low income on undercount, by equipment
+# poor is seen as a continuous variable, so you have to factor() it!!
+ggplot(georgia, aes(x=equip, y=undercount, fill=factor(poor))) + geom_bar(stat="identity", position=position_dodge())
+# The conclusion is: if a poor community uses punch cards, it would have a very high undercount, and the votes among those people are not adequately represented. If such a community wants to have its votes adequately represented, use paper (not available in those communities yet though), lever, or optical.
+
+######## effect of minority community on undercount, linear regression
+mean(georgia$perAA)
+# code perAA as 1 if perAA is higher than mean, 0 otherwise
+georgia[georgia['perAA'] > 0.24,'perAA'] = 1
+georgia[georgia['perAA'] <= 0.24,'perAA'] = 0
+
+# contingency tables, giving the sum(undercount) for each perAA * equip combination. Tried to do average(undercount) but didn't succeed. will do average in summaryBy() function below.
+t2 = xtabs(undercount~perAA+equip,data = georgia)
+t2
+# look at the average undercount of each category
+georgia_AA = georgia[georgia['perAA'] == 1,]
+xtab_AA = summaryBy(undercount~equip, data=georgia_AA, FUN = function(x) c(m = mean(x)) )
+xtab_AA
+georgia_nonAA = georgia[georgia['perAA'] == 0,]
+xtab_nonAA = summaryBy(undercount~equip, data=georgia_nonAA, FUN = function(x) c(m = mean(x)) )
+xtab_nonAA
+ggplot(georgia, aes(x=equip, y=undercount, fill=factor(perAA))) + geom_bar(stat="identity", position=position_dodge())
+# Conclusion: If a community has a higher African-American percentage than average, it would see a much higher undercount if it uses punch than optical or lever. The choice of equipment does have different effects on undercount in minority communities.
+
+```
+
+
+```{r bootstrapping}
+library(mosaic)
+library(fImport)
+library(foreach)
+library(pracma)
+mystocks = c("SPY", 'TLT', 'LQD', 'EEM', 'VNQ')
+myprices = yahooSeries(mystocks, from='2011-01-01', to='2015-07-30')
+
+YahooPricesToReturns = function(series) {
+  mycols = grep('Adj.Close', colnames(series))
+  closingprice = series[,mycols]
+  N = nrow(closingprice)
+  percentreturn = as.data.frame(closingprice[2:N,]) / as.data.frame(closingprice[1:(N-1),]) - 1
+  mynames = strsplit(colnames(percentreturn), '.', fixed=TRUE)
+  mynames = lapply(mynames, function(x) return(paste0(x[1], ".PctReturn")))
+  colnames(percentreturn) = mynames
+  as.matrix(na.omit(percentreturn))
+}
+
+######## return of individual assets (both arithmetic and compound)
+# Compute the returns from the closing prices
+myreturns = YahooPricesToReturns(myprices)
+
+# arithmetic average daily return of each stock, but this is not an accurate measure of overall return
+average_return = apply(myreturns, MARGIN = 2, FUN = mean)
+average_return
+
+# Accurate measure - compute compound average daily return of stock. 
+# First, add 1 to all values in df, which is as easy as (myreturns + 1)!!!
+myreturn1 = myreturns + 1
+head(myreturn1)
+# take nth root of the product of all returns, where n = nrow(myreturn1), chain the results into a list
+nth = nrow(myreturn1)
+compound_returns = foreach(i=1:ncol(myreturn1), .combine = 'c') %do% {
+  compound_return = nthroot(prod(myreturn1[,i]), nth)
+}
+compound_returns = compound_returns - 1
+compound_returns
+
+######## risk of individual assets
+# get a list of standard deviations of each stock, representing risk
+stdevs = foreach(i=1:ncol(myreturns), .combine='c') %do% {
+    sd(myreturns[,i])
+}
+stdevs
+# Observation: The standard deviation of emerging markets is the largest, which fits expectation.
+
+###### compute Sharpe ratio of individual assets to give a risk/return metric
+# get risk-free rate from TLT
+risk_free_return = compound_returns[2]
+sharpe = (compound_returns - risk_free_return) / stdevs
+# As expected, the Sharpe ratio of TLT is 0. Both investment-grade corporate bonds and emerging markets have a Sharpe ratio below 0 with the largest absolute values, which reflects their high risk. 
+sharpe
+
+########### choosing portfolio
+##### the even split
+totalwealth = 10000
+weights = c(0.2, 0.2, 0.2, 0.2, 0.2)
+
+# expected daily return for the even-split portfolio. 
+######Note: I used formulas mentioned in class to calculate mean and variance here, but there's a smarter way to do it. See 'smart way' below.
+expected_return_evensplit = sum(weights * compound_returns)
+expected_return_evensplit
+# expected stdev
+# get covariance
+cova = cov(myreturns)
+cova[1,1]^2
+var_terms = 0
+for (i in 1:ncol(cova)) {
+  var_terms = var_terms + cova[i, i] * weights[i] ^ 2
+}
+var_terms
+# calculate sum of covariance terms
+cova_terms = 0
+for (i in 2:nrow(cova)) {
+  for(j in 2:ncol(cova)) {
+    cova_terms = cova_terms + 2*weights[i]*weights[j]*cova[i, j]
+    #print(paste('i=',i,'j=',j))
+  }
+}
+cova_terms
+
+variance_evensplit = var_terms + cova_terms
+std_evensplit = sqrt(variance_evensplit)
+Sharpe_evensplit = (expected_return_evensplit - risk_free_return) / std_evensplit
+Sharpe_evensplit # negative!
+
+# ####### smart way - calculate daily return first!!!!
+# calculate the returns of daily portfolio return first
+evensplit = weights * (myreturns + 1) # apply weights first
+# and then sum across each row to get portfolio return
+returns_evensplit = apply(evensplit,MARGIN = 1, FUN = sum)
+head(returns_evensplit)
+returns_evensplit = returns_evensplit - 1
+head(returns_evensplit)
+# get compound return
+nth = length(returns_evensplit)
+compound_return = nthroot(prod(returns_evensplit+1), nth)
+compound_return = compound_return - 1
+compound_return
+# get stdev
+sd(returns_evensplit)
+
+
+###### to get a safer portfolio, definitely involve market and risk-free assets, and then choose real-estate because it's less volatile than investment-grade bond and emerging market
+myreturns_safe = myreturns + 1
+returns_safe = 1/3 * myreturns[,1] + 1/3 * myreturns[,2] + 1/3 *myreturns[,5]
+nth = length(returns_safe)
+expected_return_safe = nthroot(prod(returns_safe+1), nth)
+expected_return_safe = expected_return_safe - 1
+expected_return_safe # -0.999532
+sd(returns_safe) # slightly smaller than sd(returns_evensplit), 0.005930875 < 0.00596693
+
+###### to get a more aggressive portfolio, definitely involve investment-grade bond and emerging market
+myreturns_safe = myreturns + 1
+returns_aggre = 1/2 * myreturns[,3] + 1/2 *myreturns[,4]
+nth = length(returns_aggre)
+expected_return_aggre = nthroot(prod(returns_aggre+1), nth)
+expected_return_aggre = expected_return_aggre - 1
+expected_return_aggre # -0.9999526
+sd(returns_aggre) # slightly bigger than sd(returns_evensplit), 0.007137946 > 0.00596693
+
+
+######### simulation
+# create a df to put the results in
+results = data.frame(matrix(ncol = 3, nrow = 2), row.names = c('totalwealth', 'VaR'))
+colnames(results) = c('evensplit', 'safe', 'aggressive')
+
+# Now simulate many different possible trading years for even-split portfolio
+set.seed(1)
+n_days = 20
+sim1 = foreach(i=1:500, .combine='rbind') %do% {
+	totalwealth = 10000
+	weights = c(0.2, 0.2, 0.2, 0.2, 0.2)
+	holdings = weights * totalwealth
+	wealthtracker = rep(0, n_days) # Set up a placeholder to track total wealth
+	for(today in 1:n_days) {
+		return.today = resample(myreturns, 1, orig.ids=FALSE)
+		holdings = holdings + holdings*return.today # holdings is a series
+		totalwealth = sum(holdings) # so need to sum it to get total wealth
+		wealthtracker[today] = totalwealth
+		holdings = weights * totalwealth # rebalanced at 0 transaction cost
+	}
+	wealthtracker
+}
+# final wealth
+total_evensplit = totalwealth
+total_evensplit
+results['totalwealth', 'evensplit'] = total_evensplit
+# VaR
+VaR_evensplit = quantile(sim1[,n_days], 0.05) - 10000
+VaR_evensplit
+results['VaR', 'evensplit'] = VaR_evensplit
+
+
+##### bootstrapping for safe porfolio
+returns_safe = myreturns[,c(1, 2, 5)]
+
+set.seed(1) # seed is only effective for one operation, have to reset after each time it's used
+n_days = 20
+sim2 = foreach(i=1:500, .combine='rbind') %do% {
+	totalwealth = 10000
+	weights = c(1/3, 1/3, 1/3)
+	holdings = weights * totalwealth
+	wealthtracker_safe = rep(0, n_days) # Set up a placeholder to track total wealth
+	for(today in 1:n_days) {
+		return.today = resample(returns_safe, 1, orig.ids=FALSE)
+		holdings = holdings + holdings*return.today # holdings is a series
+		totalwealth = sum(holdings) # so need to sum it to get total wealth
+		wealthtracker_safe[today] = totalwealth
+		holdings = weights * totalwealth # rebalanced at 0 transaction cost
+	}
+	wealthtracker_safe
+}
+# final wealth
+total_safe = totalwealth
+total_safe
+results['totalwealth', 'safe'] = total_safe
+# VaR
+VaR_safe = quantile(sim2[,n_days], 0.05) - 10000
+VaR_safe
+results['VaR', 'safe'] = VaR_safe
+
+###### Bootstrapping for aggressive portfolio
+returns_aggre = myreturns[,c(3, 4)]
+
+set.seed(1)
+n_days = 20
+sim3 = foreach(i=1:500, .combine='rbind') %do% {
+	totalwealth = 10000
+	weights = c(0.5, 0.5)
+	holdings = weights * totalwealth
+	wealthtracker_aggre = rep(0, n_days) # Set up a placeholder to track total wealth
+	for(today in 1:n_days) {
+		return.today = resample(returns_aggre, 1, orig.ids=FALSE)
+		holdings = holdings + holdings*return.today # holdings is a series
+		totalwealth = sum(holdings) # so need to sum it to get total wealth
+		wealthtracker_aggre[today] = totalwealth
+		holdings = weights * totalwealth # rebalanced at 0 transaction cost
+	}
+	wealthtracker_aggre
+}
+# final wealth
+total_aggre = totalwealth
+total_aggre
+results['totalwealth', 'aggressive'] = total_aggre
+
+# VaR
+VaR_aggre = quantile(sim3[,n_days], 0.05) - 10000 
+VaR_aggre
+results['VaR', 'aggressive'] = VaR_aggre
+
+results
+# We can see clearly that the aggressive portfolio yields the lowest total wealth yet the largest VaR absolute value, which means it gives the lowest return and highest risk (given the seed we have). Safe portfolio actually performs the best, with highest total wealth and lowest VaR absolute value. Evensplit is somewhere between aggressive and safe portfolio. So I would recommend my client to choose 'safe' portfolio.
+
+```
+
+```{r clustering and PCA}
+wine <- read.csv("/Users/vickyzhang/Documents/MSBA/predictive2/STA380/data/wine.csv", header=TRUE, stringsAsFactors=FALSE) # use the last flag to force color to be character
+# code color as number
+wine[wine$color == 'red','color'] = 1.0
+wine[wine$color == 'white','color'] = 0.0
+wine$color = as.numeric(wine$color)
+wine$quality = as.numeric(wine$quality)
+# str(wine)
+# is.numeric(wine)
+
+
+wine_scaled <- scale(wine, center=TRUE, scale=TRUE) 
+# just cluster 2 features
+set.seed(1)
+cluster_wine <- kmeans(wine_scaled[,c("fixed.acidity","citric.acid")], centers=3)
+
+plot(wine_scaled[,"citric.acid"], wine_scaled[,"fixed.acidity"], xlim=c(-2,2.75), 
+    type="n", xlab="citric.acid", ylab="fixed.acidity")  
+text(wine_scaled[,"citric.acid"], wine_scaled[,"fixed.acidity"], labels=rownames(wine), 
+    col=rainbow(3)[cluster_wine$cluster])
+
+# cluster all features
+set.seed(1)
+cluster_all <- kmeans(wine_scaled, centers=7, nstart = 50)
+cluster_all$centers
+
+# the following plot shows some relation between cluster number and quality, but not very distinct.
+qplot(citric.acid, quality, data=wine, color=factor(cluster_all$cluster))
+
+# In the following 2 plots, cluster 1, 2, 3 => red wine; cluster 4, 5, 6, 7 => white wine. The clusters are generally effective in recognizing the color of wine. There are a few wrong predictions but not many. 
+qplot(citric.acid, color, data=wine, color=factor(cluster_all$cluster))
+qplot(fixed.acidity, color, data=wine, color=factor(cluster_all$cluster))
+
+
+
+######### PCA
+pc1 = prcomp(wine, scale.=TRUE)
+#pc1
+summary(pc1)
+plot(pc1)
+# not very informative plot
+#biplot(pc1)
+
+# more informative plot
+loadings = pc1$rotation
+scores = pc1$x
+qplot(scores[,1], scores[,2], color=wine$color, xlab='Component 1', ylab='Component 2')
+# We can clearly see the diff between red and white wine, but there are some overlap area in between the two clusters. For those points, PCA does not do a very good job telling which color it is. In contrast, recall that there is almost no vague area in clustering. In other words, for each data point, as long as you know which cluster it is in, you can get an almost accurate prediction on its color, using clustering. So I would say clustering does a better job than PCA here.
+
+qplot(scores[,1], scores[,2], color=wine$quality, xlab='Component 1', ylab='Component 2')
+# As for wine quality, the split between good wine and bad wine isn't very clear under PCA. As we can see from the graph, the dots of different colors are all mixed together. Similar situation in clustering.
+
+```
+
+```{r market}
+twitter <- read.csv("/Users/vickyzhang/Documents/MSBA/predictive2/STA380/data/social_marketing.csv", header=TRUE) # use the last flag to force color to be character
+# get a brief summary of all features. Most features have a median of 0 and mean of less than 1, which means users don't post more than one tweet on any topic, on average. However the mean and median of chatter are both higher than normal, so either the annotators didn't do a good job or people just like to talk about random things that are hard to categorize.
+summary(twitter)
+# get rid of rows with NA, get rid of random userID. There's no problem with just using row index as user ID. Also, no need to do scaling here because all data are on the same scale.
+twitter = twitter[complete.cases(twitter),][,-1]
+# cluster on all features
+cluster_all <- kmeans(twitter, centers=7, nstart = 50)
+cluster_all$centers
+# going through each cluster, we can delineate a 'portrait' for each group:
+# group 1 - online-gaming(10) college(10) student. got 10+ on both online_gaming and college_uni. 2+ on sports_playing too, which fits into the picture. Inference: likely male, aged 18-22. could market these products to them: World of WarCraft expansion pack, ergonomic keyboard / mouse / computer chair, microwavable dinner.
+# group 2 - traveler(6) passionate about politics(10), news(5) and automotive(2). Inference: likely male. Potential buyer of : Online news/critics subscription, traveler magazine, Lonely Planet, Travel channel, suitcases, cars
+# group 3 - uninterested in everything. Potential buyer of : basic living necessities (since we can't figure out what else they need)
+# group 4 - photo-sharing(5) shopper(3). Inference: likely to be women. Potential buyer of : fashion, and possibly everything else
+# group 5 - photo-sharing(2) sports-loving(6) foodie(4), care about family(2), religion(5), parenting(4), school(2). inference: married and have kids. more likely to be female. Potential customer of : sports tickets, Yelp, religious material, parenting websites
+# group 6 - photo-sharing(6), health-nutrition(2), cooking(12), beauty(3), fashion(5). likely to be a women or even a wife. Potential customer of : Martha Stewart, Food Network, Instagram
+# group 7 - photo-sharing(2), food(2), health-nutrition(12), cooking(3), outdoors(2), personal_fitness(6). seems to be some very health-aware people. Potential buyer of : whey protein, pre-workout, fitness coaching, nutrition planning
+
+plot(twitter[,"travel"], twitter[,"photo_sharing"], xlim=c(-2,2.75), 
+    type="n", xlab="travel", ylab="photo_sharing")
+text(twitter[,"travel"], twitter[,"photo_sharing"], labels=rownames(twitter), 
+    col=rainbow(7)[cluster_all$cluster])
+# doesn't show much information, all colors seem to be mixed together
+
+# try PCA
+pc1 = prcomp(twitter, scale.=TRUE)
+#pc1 
+# Not showing pc1 results here because it's very long and I found it not as informative as clustering here. For clustering, interpretability is quite good, you can immediately start talking about each cluster as a group of users; but as for PCA, the principal components don't have direct meanings.
+summary(pc1)
+plot(pc1)
+# not very informative plot
+#biplot(pc1)
+
+# more informative plot
+loadings = pc1$rotation
+scores = pc1$x # There are 36 principal components and each of them don't contribute much to cumulative proportion
+
+
+```
+
